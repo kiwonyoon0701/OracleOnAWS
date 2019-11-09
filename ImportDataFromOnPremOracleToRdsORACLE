@@ -1,0 +1,199 @@
+OnPrem Oracle to RDS Oracle로 datapump로 data migration example
+
+### Source Database aq_tm_processes, streams_pool_size 값이 0 이상인지 확인
+
+SQL> show parameter aq_tm_processes
+NAME				     TYPE	 VALUE
+------------------------------------ ----------- ------------------------------
+aq_tm_processes 		     integer	 1
+
+SQL> show parameter streams_pool_size
+NAME				     TYPE	 VALUE
+------------------------------------ ----------- ------------------------------
+streams_pool_size		     big integer 16M
+
+
+### Source Database 작업 -- sysdba user
+oracle@oracle11g:/home/oracle> sqlplus / as sysdba
+SQL> create user oshoptest identified by <PASSWORD> default tablespace users temporary tablespace temp quota unlimited on users;
+SQL> grant connect,resource,create table, create database link to oshoptest;
+SQL> !mkdir -p /home/oracle/oshop_dir                                 
+
+SQL> create or replace directory oshop_DIR as '/home/oracle/oshop_dir';
+Directory created.
+
+SQL> grant read,write on directory oshop_DIR to oshoptest;
+Grant succeeded.
+
+SQL> grant select_catalog_role to  oshoptest;
+Grant succeeded.
+
+SQL> grant execute on dbms_datapump to oshoptest;
+Grant succeeded.
+
+SQL> grant execute on dbms_file_transfer to oshoptest;
+Grant succeeded.
+
+### Source Database 작업 -- oshopTEST USER Table 및 Data 생성 후 Datapump로 export
+SQL> conn oshoptest/<PASSWORD>
+Connected.
+SQL> create table emp(id number, name varchar2(100));
+Table created.
+
+SQL> insert into emp values (&id, '&name');
+Enter value for id: 1
+Enter value for name: abc
+old   1: insert into emp values (&id, '&name')
+new   1: insert into emp values (1, 'abc')
+1 row created.
+
+SQL> /
+Enter value for id: 2
+Enter value for name: cdf
+old   1: insert into emp values (&id, '&name')
+new   1: insert into emp values (2, 'cdf')
+1 row created.
+
+SQL> commit;
+Commit complete.
+
+SQL> select * from emp;
+	ID NAME
+---------- ----------------------------------------------------------------------------------------------------
+	 1 abc
+	 2 cdf
+
+SQL> SELECT * FROM all_tab_privs WHERE TABLE_NAME IN ( SELECT DIRECTORY_NAME FROM all_directories );
+GRANTOR 		       GRANTEE			      TABLE_SCHEMA		     TABLE_NAME 		    PRIVILEGE				     GRA HIE
+------------------------------ ------------------------------ ------------------------------ ------------------------------ ---------------------------------------- --- ---
+SYS			       oshopTEST 		      SYS			     oshop_DIR			    READ				     NO  NO
+SYS			       oshopTEST 		      SYS			     oshop_DIR			    WRITE				     NO  NO
+
+SQL> SELECT * FROM datapump_dir_objs;
+NAME			       PATH						  READ	WRITE
+------------------------------ -------------------------------------------------- ----- -----
+oshop_DIR		       /home/oracle/oshop_dir				  TRUE	TRUE
+
+
+SQL> DECLARE
+hdnl NUMBER;
+BEGIN
+hdnl := DBMS_DATAPUMP.OPEN( operation => 'EXPORT', job_mode => 'SCHEMA', job_name=>null);
+DBMS_DATAPUMP.ADD_FILE( handle => hdnl, filename => 'oshoptest.dmp', directory => 'oshop_DIR', filetype => dbms_datapump.ku$_file_type_dump_f  2    3    4    5  ile);
+DBMS_DATAPUMP.ADD_FILE( handle => hdnl, filename => 'oshoptest.log', directory => 'oshop_DIR', filetype => dbms_datapump.ku$_file_type_log_file);
+DBMS_DATAPUMP.METADATA_FILTER(hdnl,'SCHEMA_EXPR','IN (''oshopTEST'')');
+DBMS_DATAPUMP.START_JOB(hdnl);
+END;  6    7    8    9  
+/  10  
+
+PL/SQL procedure successfully completed.
+
+SQL> !ls -alrt /home/oracle/oshop_dir    
+total 16
+drwx------. 3 oracle oinstall 4096 Nov  9 08:41 ..
+-rw-r--r--. 1 oracle oinstall    0 Nov  9 08:45 oshoptest.log
+drwxr-xr-x. 2 oracle oinstall 4096 Nov  9 08:45 .
+-rw-r-----. 1 oracle oinstall 8192 Nov  9 08:45 oshoptest.dmp
+
+SQL> !cat /home/oracle/oshop_dir/oshoptest.log
+Starting "oshopTEST"."SYS_EXPORT_SCHEMA_01":  
+Estimate in progress using BLOCKS method...
+Processing object type SCHEMA_EXPORT/TABLE/TABLE_DATA
+Total estimation using BLOCKS method: 64 KB
+Processing object type SCHEMA_EXPORT/PRE_SCHEMA/PROCACT_SCHEMA
+Processing object type SCHEMA_EXPORT/TABLE/TABLE
+Processing object type SCHEMA_EXPORT/TABLE/COMMENT
+Processing object type SCHEMA_EXPORT/TABLE/INDEX/INDEX
+Processing object type SCHEMA_EXPORT/TABLE/CONSTRAINT/CONSTRAINT
+Processing object type SCHEMA_EXPORT/TABLE/INDEX/STATISTICS/INDEX_STATISTICS
+. . exported "oshopTEST"."EMP"                            5.421 KB       2 rows
+Master table "oshopTEST"."SYS_EXPORT_SCHEMA_01" successfully loaded/unloaded
+******************************************************************************
+Dump file set for oshopTEST.SYS_EXPORT_SCHEMA_01 is:
+  /home/oracle/oshop_dir/oshoptest.dmp
+Job "oshopTEST"."SYS_EXPORT_SCHEMA_01" successfully completed at Sat Nov 9 08:45:49 2019 elapsed 0 00:00:15
+
+### Source Database 작업 -- sysdba user로 Database Link 생성 및 dump 전송
+oracle@oracle11g:/home/oracle> sqlplus / as sysdba
+SQL> create public database link to_rds_oracle_12 connect to <RDS ADMIN USERNAME> identified by <RDS Admin User PASSWORD> using '(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=<RDS_ORACLE_HOSTNAME>)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))';
+Database link created.
+
+SQL> BEGIN
+DBMS_FILE_TRANSFER.PUT_FILE(
+source_directory_object       => 'oshop_DIR',
+source_file_name              => 'oshoptest.dmp',
+destination_directory_object  => 'DATA_PUMP_DIR',
+destination_file_name         => 'oshoptest.dmp',
+destination_database          2    3    4    5    6    7    => 'to_rds_oracle_12'
+);
+END;
+/   8    9   10  
+
+PL/SQL procedure successfully completed.
+
+### Source Database 작업 -- tnsnames.ora에 RDS ORACLE의 tns alias를 구성
+oracle@oracle11g:/home/oracle> cat $ORACLE_HOME/network/admin/tnsnames.ora 
+rds_oracle_12 =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = <RDS_ORACLE_HOSTNAME>)(PORT = 1521))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SID=ORCL)
+    )
+  )
+
+### RDS Target Database 작업 -- RDS Admin User를 사용하여 oshopTEST User 생성 및 권한 할당
+oracle@oracle11g:/home/oracle> sqlplus superdba@rds_oracle_12
+
+SQL*Plus: Release 11.2.0.4.0 Production on Sat Nov 9 08:51:49 2019
+
+Copyright (c) 1982, 2013, Oracle.  All rights reserved.
+
+Enter password: 
+
+Connected to:
+Oracle Database 12c Enterprise Edition Release 12.1.0.2.0 - 64bit Production
+With the Partitioning, OLAP, Advanced Analytics and Real Application Testing options
+
+SQL> create user oshoptest identified by <PASSWORD> default tablespace users temporary tablespace temp quota unlimited on users;
+User created.
+
+SQL> grant create session,connect, resource to oshoptest;
+Grant succeeded.
+
+### RDS Target Database 작업 -- Source에서 보내준 oshoptest.dmp를 oshopTEST User로 Import
+SQL> DECLARE
+hdnl NUMBER;
+BEGIN
+hdnl := DBMS_DATAPUMP.OPEN( operation => 'IMPORT', job_mode => 'SCHEMA', job_name=>null);
+DBMS_DATAPUMP.ADD_FILE( handle => hdnl, filename => 'oshoptest.dmp', directory => 'DATA_PUMP_DIR', filetype => dbms_datapump.ku$_file_type_d  2    3    4    5  ump_file);
+DBMS_DATAPUMP.METADATA_FILTER(hdnl,'SCHEMA_EXPR','IN (''oshopTEST'')');
+DBMS_DATAPUMP.START_JOB(hdnl);
+END;
+/       6    7    8    9  
+
+PL/SQL procedure successfully completed.
+
+### RDS Target Database 작업 -- RDS Oracle에 oshoptest로 접속하여 정상적으로 Data로 Import 되었는지 확인
+oracle@oracle11g:/home/oracle> sqlplus oshoptest@rds_oracle_12
+SQL*Plus: Release 11.2.0.4.0 Production on Sat Nov 9 08:53:43 2019
+
+Copyright (c) 1982, 2013, Oracle.  All rights reserved.
+
+Enter password: 
+
+Connected to:
+Oracle Database 12c Enterprise Edition Release 12.1.0.2.0 - 64bit Production
+With the Partitioning, OLAP, Advanced Analytics and Real Application Testing options
+
+SQL> select * from tab;
+TNAME																 TABTYPE  CLUSTERID
+-------------------------------------------------------------------------------------------------------------------------------- ------- ----------
+EMP																 TABLE
+
+SQL> select * from EMP;
+	ID NAME
+---------- ----------------------------------------------------------------------------------------------------
+	 1 abc
+	 2 cdf
+     
